@@ -1,0 +1,12 @@
+[project]
+name = "pocketbase-pbi-pipeline"
+version = "0.1.0"
+description = "Attendance ETL pipeline from PocketBase to PBI"
+requires-python = ">=3.13"
+dependencies = [
+    "pandas",
+    "pocketbase",
+    "numpy",
+]
+
+[tool.black]

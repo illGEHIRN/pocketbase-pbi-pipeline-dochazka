@@ -37,10 +37,10 @@ users_data = response_users.json().get("items", [])
 # ATTENDANCE list JSON fetch
 
 # info on total items in DB from JSON
-attendence_total_items = (
+attendance_total_items = (
     requests.get(POCKETBASE_ATTENDANCE_URL, headers=headers).json().get("totalItems")
 )
-print("Total number of items found in the database:", attendence_total_items)
+print("Total number of items found in the database:", attendance_total_items)
 
 # pagination while loop
 all_attendance_records = []
@@ -70,26 +70,33 @@ while (
     page += 1  # the page turner
 
 print(f"\nDone, Total records: {len(all_attendance_records)}")
-if attendence_total_items == len(all_attendance_records):
+if attendance_total_items == len(all_attendance_records):
     print("Fetched records equal to total items in the database, SUCCESS!!")
 else:
     print(
-        f"Missing records compared to all items in the database ({attendence_total_items - len(all_attendance_records)} missing)"
+        f"Missing records compared to all items in the database ({attendance_total_items - len(all_attendance_records)} missing)"
     )
 
 
 # create pandas data frames
 df_users = pd.DataFrame(users_data)
-df_attendence = pd.DataFrame(all_attendance_records)
+df_attendance = pd.DataFrame(all_attendance_records)
 
 
 # quick check
 print(df_users.head(2))
-print(df_attendence.head(1))
-len(df_attendence)
+print(df_attendance.head(1))
+len(df_attendance)
 
 
 # check how one entire JSON record look like!
-sample = df_attendence.iloc[0].to_dict()
+sample = df_attendance.iloc[0].to_dict()
 with open("sample.json", "w", encoding="utf-8") as f:
     json.dump(sample, f, indent=2, ensure_ascii=False)
+
+
+# save fetched data for now (for development)
+# later restructire this .py to be a function, more convenient, more dynamic, better utility
+
+df_users.to_json("JSONs/users_raw.json", orient="records", indent=2)
+df_attendance.to_json("JSONs/attendance_raw.json", orient="records", indent=2)

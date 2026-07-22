@@ -5,7 +5,7 @@ description = "Attendance ETL pipeline from PocketBase to PBI"
 requires-python = ">=3.13"
 dependencies = [
     "pandas",
-    "pocketbase",
+    "requests",
     "numpy",
 ]
 

@@ -3,3 +3,4 @@ __pycache__/
 .env
 UNRELATED git version control workflow
 .zed
+sample.json

@@ -1,3 +1,4 @@
+import json
 import os
 
 import pandas as pd
@@ -84,5 +85,11 @@ df_attendence = pd.DataFrame(all_attendance_records)
 
 # quick check
 print(df_users.head(2))
-print(df_attendence.head(2))
+print(df_attendence.head(1))
 len(df_attendence)
+
+
+# check how one entire JSON record look like!
+sample = df_attendence.iloc[0].to_dict()
+with open("sample.json", "w", encoding="utf-8") as f:
+    json.dump(sample, f, indent=2, ensure_ascii=False)

@@ -1,6 +1,5 @@
 import json
 import os
-
 import pandas as pd
 import requests
 from dotenv import load_dotenv
@@ -25,13 +24,15 @@ print("Token received", "YES" if token else "NO")
 
 # authorisation header
 headers = {"Authorization": token}
+# params for users fetch
+user_params = {"page": 1, "perPage": 70}
 
 # exposed PocketBase API URLs
 POCKETBASE_USERS_URL = f"{BASE_URL}/api/collections/users/records"
 POCKETBASE_ATTENDANCE_URL = f"{BASE_URL}/api/collections/attendance/records"
 
 # USERS list JSON fetch
-response_users = requests.get(POCKETBASE_USERS_URL, headers=headers)
+response_users = requests.get(POCKETBASE_USERS_URL, headers=headers, params=user_params)
 users_data = response_users.json().get("items", [])
 
 # ATTENDANCE list JSON fetch

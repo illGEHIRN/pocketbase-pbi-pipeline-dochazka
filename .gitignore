@@ -6,3 +6,6 @@ UNRELATED git version control workflow
 sample.json
 JSONs
 CSVs
+data/
+logs/
+data/processed/fact_attendance.csv

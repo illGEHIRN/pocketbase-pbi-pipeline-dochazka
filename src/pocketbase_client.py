@@ -38,7 +38,7 @@ class PocketBaseExtractor:
             raise
 
     def fetch_users(self) -> list:
-        """ ... """
+        """ Fetch users, no pagination needed """
         logger.info("Fetching users from PB collection 'users'")
         try:
             response_users = requests.get(
@@ -60,7 +60,7 @@ class PocketBaseExtractor:
             raise
 
     def fetch_attendance(self) -> list:
-        """ ... """
+        """ Fetch attendance records, pagination loops to extract it all """
         logger.info("Fetching attendance records")
 
         # info on total items in DB from JSON
@@ -110,14 +110,13 @@ class PocketBaseExtractor:
         logger.info(f"Fetched {len(all_attendance_records)} records")
         return all_attendance_records
 
+
     def save_raw_json(self, data: list, filename: str):
         """Save data to RAW_DATA_DIR as raw JSON files"""
         output_path = RAW_DATA_DIR / filename
         with open(output_path, "w", encoding="utf-8") as f:
             json.dump(data, f, ensure_ascii=False, indent=2)
         logger.info(f"Saved raw data to {output_path}")
-
-
 
     # Self running the script, later from main...
 

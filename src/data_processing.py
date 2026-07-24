@@ -52,9 +52,22 @@ df_attendance["type"] = df_attendance["type"].replace(
 working_types = [
     "present",
     "homeoffice",
-    "businesstrip-foreign",
-    "businesstrip-domestic",
 ]
+
+businesstrips = [
+    "businesstrip-domestic",
+    "businesstrip-foreign"
+]
+
+# --------------------------------------------------------------------------------------------------------
+# autoclose types
+#should_autoclose = df_attendance["to"].isna() & ~df_attendance["type"].isin(working_types)
+#df_attendance["to"] = np.where(
+#    should_autoclose, 
+#    "17:00:00",
+#    df_attendance["to"]
+#)
+# --------------------------------------------------------------------------------------------------------
 
 # calculate hours worked
 time_from = pd.to_timedelta(df_attendance["from"] + ":00", errors="coerce")
@@ -64,6 +77,7 @@ raw_duration = round(((time_to - time_from).dt.total_seconds() / 3600), 1)
 
 # create dummies
 is_working = df_attendance["type"].isin(working_types)
+is_businesstrip = df_attendance["type"].isin(businesstrips)
 is_pause = df_attendance["type"] == "pause"
 is_doctor = df_attendance["note"] == "Lékař"
 is_training = df_attendance["note"] == "Školení"
@@ -87,7 +101,8 @@ df_attendance["hours_paused"] = np.where(
 
 conditions = [is_unclosed & is_working,
               is_unclosed & is_pause,
-              is_pause, 
+              is_pause,
+              is_businesstrip,
               ~is_working,
               ]
 
@@ -95,6 +110,7 @@ choices = [
     "Unclosed Work Shift",
     "Unclosed Break",
     "Break / Pause",
+    "Business Trip",
     "Non-Working Event",
 ]
 
@@ -145,14 +161,20 @@ is_other_type  = df_attendance["type"] != "pause"
 
 df_attendance = df_attendance[is_other_type | is_valid_pause].copy()
 
-
-
+# Resolve "invalid date" value in 'to' directly from PB API
+resolve_invalid_date = df_attendance["to"] == "Invalid Date"
+df_attendance["to"] = np.where(
+    resolve_invalid_date,
+    np.nan,
+    df_attendance["to"]
+)
 
 # export to csv
 df_dim_users.to_csv(PROCESSED_DATA_DIR / "dim_users.csv", index=False, encoding="utf-8-sig")
 df_attendance.to_csv(PROCESSED_DATA_DIR / "fact_attendance.csv", index=False, encoding="utf-8-sig")
 
 
+# upload data to SQL server..... TO DO
 
 
 

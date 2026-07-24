@@ -3,3 +3,9 @@ __pycache__/
 .env
 UNRELATED git version control workflow
 .zed
+sample.json
+JSONs
+CSVs
+data/
+logs/
+data/processed/fact_attendance.csv

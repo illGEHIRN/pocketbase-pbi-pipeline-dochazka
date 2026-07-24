@@ -8,6 +8,7 @@ from config import (
     PB_PASSWORD,
     POCKETBASE_ATTENDANCE_URL,
     POCKETBASE_USERS_URL,
+    POCKETBASE_HOLIDAY_URL,
     RAW_DATA_DIR,
 )
 
@@ -40,12 +41,13 @@ class PocketBaseExtractor:
     def fetch_users(self) -> list:
         """ Fetch users, no pagination needed """
         logger.info("Fetching users from PB collection 'users'")
+
         try:
             response_users = requests.get(
                 POCKETBASE_USERS_URL,
                 headers = self.headers,
                 params={"perPage": 200},
-                timeout = 15,
+                timeout = 25,
             )
             response_users.raise_for_status()
             print(f"Users fetch Status Code: {response_users.status_code}")
@@ -57,6 +59,30 @@ class PocketBaseExtractor:
 
         except requests.RequestException as exception:
             logger.error(f"Failed to fetch users: {exception}")
+            raise
+
+    def fetch_CzechHolidays(self) -> list:
+        """ Fetch Czech Holidays from PB collection 'holidays' """
+        logger.info("Fetching Czech Holidays")
+
+        try:
+            response_holidays = requests.get(
+              POCKETBASE_HOLIDAY_URL,
+              headers = self.headers,
+              params={"perPage": 100},
+              timeout = 25,
+            )
+            response_holidays.raise_for_status()
+            print(f"Holidays fetch Status Code: {response_holidays.status_code}")
+
+            holidays_data = response_holidays.json().get("items", [])
+
+            logger.info(f"Fetched {len(holidays_data)} holidays")
+
+            return holidays_data
+
+        except requests.RequestException as exception:
+            logger.error(f"Failed to fetch Holiday data: {exception}")
             raise
 
     def fetch_attendance(self) -> list:
@@ -76,7 +102,10 @@ class PocketBaseExtractor:
     
         while True: # while True:... is basically infinite loop until we break it with if ... break
             try:           
-                params = {"page": page, "perPage": per_page}
+                params = {"page": page, 
+                          "perPage": per_page,
+                          "filter": 'date >= "2024-01-01 00:00:00.000Z"'
+                          }
 
                 response = requests.get(
                     POCKETBASE_ATTENDANCE_URL, 
@@ -124,6 +153,8 @@ class PocketBaseExtractor:
         """Main execution."""
         users = self.fetch_users()
         attendance = self.fetch_attendance()
+        holidays = self.fetch_CzechHolidays()
 
         self.save_raw_json(users, "users_raw.json")
         self.save_raw_json(attendance, "attendance_raw.json")
+        self.save_raw_json(holidays, "holidays_raw.json")

@@ -9,6 +9,7 @@ BASE_URL = "https://db.dochazka.czs.muni.cz"
 # exposed PocketBase API URLs
 POCKETBASE_USERS_URL = f"{BASE_URL}/api/collections/users/records"
 POCKETBASE_ATTENDANCE_URL = f"{BASE_URL}/api/collections/attendance/records"
+POCKETBASE_HOLIDAY_URL = f"{BASE_URL}/api/collections/holidays/records"
 AUTH_URL = f"{BASE_URL}/api/admins/auth-with-password"
 
 # secrets

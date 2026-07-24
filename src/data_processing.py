@@ -12,6 +12,7 @@ logger = logging.getLogger("ETL_Logger")
 # load data in JSONs to dataframes
 df_users = pd.read_json(RAW_DATA_DIR / "users_raw.json")
 df_attendance = pd.read_json(RAW_DATA_DIR / "attendance_raw.json")
+df_holidays = pd.read_json(RAW_DATA_DIR / "holidays_raw.json")
 
 # explode/flatten the "times" in attendance JSON
 df_exploded = df_attendance.explode("times").reset_index(drop=True)
@@ -169,9 +170,13 @@ df_attendance["to"] = np.where(
     df_attendance["to"]
 )
 
+
+
+
 # export to csv
 df_dim_users.to_csv(PROCESSED_DATA_DIR / "dim_users.csv", index=False, encoding="utf-8-sig")
 df_attendance.to_csv(PROCESSED_DATA_DIR / "fact_attendance.csv", index=False, encoding="utf-8-sig")
+df_holidays.to_csv(PROCESSED_DATA_DIR / "dim_holidays.csv", index=False, encoding="utf-8-sig")
 
 
 # upload data to SQL server..... TO DO

@@ -188,13 +188,29 @@ workday_list = [
     if d.weekday() < 5 and d not in holiday_dates
 ] # this populates worlday_list with worday dates that are not weekend nor in holiday_dates
 
-# cartesian product/grid
-active_user_ids = df_dim_users["user_id"].unique()
-
-grid_df = pd.DataFrame(
-    [(u_id, w_date) for u_id in active_user_ids for w_date in workday_list],
-    columns=["user_id", "date"]
+# infer each users start date as their earliest actual recorded entry in raw attendance
+user_start_dates = (
+    df_attendance[df_attendance["from"].notna() | df_attendance["id"].notna()]
+    .groupby("user_id")["date"]
+    .min()
+    .to_dict()
 )
+
+# build grid ONLY from each user's first actual active date up to today
+active_user_ids = df_dim_users["user_id"].unique()
+grid_rows = []
+
+for u_id in active_user_ids:
+    # Get user's inferred start date; fallback to min_date if user has no entries
+    user_start = user_start_dates.get(u_id, min_date)
+    
+    # Only keep workdays on or after their first real entry
+    valid_user_workdays = [w_date for w_date in workday_list if w_date >= user_start]
+    
+    for w_date in valid_user_workdays:
+        grid_rows.append((u_id, w_date))
+
+grid_df = pd.DataFrame(grid_rows, columns=["user_id", "date"])
 
 # determine existing user-date entries in attendance records
 existing_entries = df_attendance[["user_id", "date"]].drop_duplicates()

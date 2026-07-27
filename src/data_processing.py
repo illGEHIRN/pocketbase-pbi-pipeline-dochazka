@@ -49,6 +49,12 @@ df_attendance["type"] = df_attendance["type"].replace(
     {"homeoffice-extraordinary": "homeoffice"}
 )
 
+# standardize date
+# Datetime, Durations Formatting and Cleaning
+df_attendance["date"] = pd.to_datetime(
+    df_attendance["date"]).dt.date  # "Date" is the exact day the attendance is occuring not when its set or updated so "Date" with type "Vacation" means that on that specific date a vacation occured
+
+
 # define categories
 working_types = [
     "present",
@@ -125,12 +131,6 @@ df_attendance["Doctor"] = is_doctor
 df_attendance["Training"] = is_training
 df_attendance["SickLeave"] = is_sick
 
-
-# Datetime, Durations Formatting and Cleaning
-df_attendance["date"] = pd.to_datetime(
-    df_attendance["date"]).dt.date  # "Date" is the exact day the attendance is occuring not when its set or updated so "Date" with type "Vacation" means that on that specific date a vacation occured
-
-
 # keys, join 
 df_dim_users = df_users.rename(columns={
     "id": "user_id"
@@ -170,6 +170,131 @@ df_attendance["to"] = np.where(
     df_attendance["to"]
 )
 
+# Resolve missing rows for non-fulltime employees
+# EXPLAINER: employee with say 0.5 contract have no attendance record until its created but for employees who has base state for work day as no row at all shown as "absent" in Dochazka PWA then the row does not exist for that day for that specific employee even tho we want to have the information about their absence from workplace
+
+# define tange
+min_date = df_attendance["date"].min()
+today = pd.to_datetime("today").date()
+
+# full date series
+all_dates = pd.date_range(start = min_date, end = today).date
+
+# resolve holidays
+holiday_dates = set(pd.to_datetime(df_holidays["date"]).dt.date) if "date" in df_holidays.columns else set()
+
+workday_list = [
+    d for d in all_dates
+    if d.weekday() < 5 and d not in holiday_dates
+] # this populates worlday_list with worday dates that are not weekend nor in holiday_dates
+
+# cartesian product/grid
+active_user_ids = df_dim_users["user_id"].unique()
+
+grid_df = pd.DataFrame(
+    [(u_id, w_date) for u_id in active_user_ids for w_date in workday_list],
+    columns=["user_id", "date"]
+)
+
+# determine existing user-date entries in attendance records
+existing_entries = df_attendance[["user_id", "date"]].drop_duplicates()
+existing_entries["exists"] = True
+
+# merge the grid with existing entries to single out non-existing entries
+missing_workdays = grid_df.merge(
+    existing_entries, 
+    on=["user_id", "date"], 
+    how="left"
+)
+missing_workdays = missing_workdays[missing_workdays["exists"].isna()].drop(columns=["exists"])
+
+logger.info(f"Auto-generating {len(missing_workdays)} 'absent' rows for unlogged workdays.")
+
+missing_rows = pd.DataFrame({
+    "id": None,                             # Synthetic/null ID
+    "user_id": missing_workdays["user_id"],
+    "date": missing_workdays["date"],
+    "type": "absent",
+    "note": "Auto-created by ETL",
+    "status_flag": "Non-Working Event",
+    "Doctor": False,
+    "Training": False,
+    "SickLeave": False,
+    "from": None,
+    "to": None,
+    "hours_worked": 0.0,
+    "hours_paused": 0.0,
+    "lunch": False,
+    "manual": False,
+    "wage": None
+})
+
+# append back
+df_attendance = pd.concat([df_attendance, missing_rows], ignore_index=True)
+
+# PRIMARY TYPE
+# EXPLAINER: There can occur an edge case where a person has both "homeoffice" and "present" types where we have to determine which is dominant, the more hours worked in a specific "type" will be the PRIMARY TYPE
+
+df_attendance["_is_present_entry"] = (df_attendance["type"] == "present") & (
+    (df_attendance["hours_worked"] > 0) | (df_attendance["from"].notna())
+)
+df_attendance["_is_ho_entry"] = (df_attendance["type"] == "homeoffice") & (
+    (df_attendance["hours_worked"] > 0) | (df_attendance["from"].notna())
+)
+
+present_hrs = np.where(df_attendance["type"] == "present", df_attendance["hours_worked"], 0.0)
+ho_hrs = np.where(df_attendance["type"] == "homeoffice", df_attendance["hours_worked"], 0.0)
+
+# 2. Attach temporarily or group directly using pandas.NamedAgg / assign
+daily_summary = (
+    df_attendance
+    .assign(_present=present_hrs, _ho=ho_hrs)
+    .groupby(["user_id", "date"], as_index=False)
+    .agg(
+        present_hrs=("_present", "sum"),
+        ho_hrs=("_ho", "sum"),
+        has_present_entry=("_is_present_entry", "any"),
+        has_ho_entry=("_is_ho_entry", "any"),
+        is_sick=("SickLeave", "any")
+    )
+)
+
+def assign_primary_type(row):
+    if row["is_sick"]:
+        return "Sick Leave"
+    
+    # Priority 1: Check completed hours worked
+    elif row["present_hrs"] > 0 and row["present_hrs"] >= row["ho_hrs"]:
+        return "In-Office"
+    elif row["ho_hrs"] > 0 and row["ho_hrs"] > row["present_hrs"]:
+        return "Home Office"
+    
+    # Priority 2: Fallback for Active/Unclosed Shifts today (where hours_worked is 0.0)
+    elif row["has_present_entry"]:
+        return "In-Office"
+    elif row["has_ho_entry"]:
+        return "Home Office"
+    
+    else:
+        return "Out of Office"
+
+daily_summary["primary_type"] = daily_summary.apply(assign_primary_type, axis=1)
+df_attendance = df_attendance.drop(columns=["_is_present_entry", "_is_ho_entry"]) # clean up helper cols
+
+# merge back
+df_attendance = df_attendance.merge(
+    daily_summary[["user_id", "date", "primary_type"]],
+    on=["user_id", "date"],
+    how="left"
+)
+
+# select final clean columns for PBI
+attendance_cols = [
+    "id", "user_id", "date", "type", "primary_type", "note", "status_flag", 
+    "Doctor", "Training", "SickLeave", "from", "to", "hours_worked", 
+    "hours_paused", "lunch", "manual", "wage"
+]
+df_attendance = df_attendance[attendance_cols]
 
 
 

@@ -20,6 +20,9 @@ times_df = pd.json_normalize(df_exploded["times"])
 
 df_attendance = pd.concat([df_exploded.drop(columns=["times"]), times_df], axis=1)
 
+
+
+
 # -----------------------------------------------------------------------------------------
 
 # inspection
@@ -35,14 +38,16 @@ print(df_attendance[["date", "user", "from", "to", "type", "wage"]].head(5))
 
 # -----------------------------------------------------------------------------------------
 
+
+
+
+
 # Cleaning, merging types
 
 # print(df_attendance["type"].value_counts())
 
 # delete "arrival" type, its obsolete
 df_attendance = df_attendance[df_attendance["type"] != "arrival"].copy()
-# delete archived users
-df_users = df_users[~df_users["archived"]].copy()
 
 # merge two homeoffice types
 df_attendance["type"] = df_attendance["type"].replace(
@@ -66,15 +71,6 @@ businesstrips = [
     "businesstrip-foreign"
 ]
 
-# --------------------------------------------------------------------------------------------------------
-# autoclose types
-#should_autoclose = df_attendance["to"].isna() & ~df_attendance["type"].isin(working_types)
-#df_attendance["to"] = np.where(
-#    should_autoclose, 
-#    "17:00:00",
-#    df_attendance["to"]
-#)
-# --------------------------------------------------------------------------------------------------------
 
 # calculate hours worked
 time_from = pd.to_timedelta(df_attendance["from"] + ":00", errors="coerce")
@@ -127,27 +123,139 @@ df_attendance["status_flag"] = np.select(
     default="Standard Completed Shift"
 )
 
-df_attendance["Doctor"] = is_doctor
-df_attendance["Training"] = is_training
-df_attendance["SickLeave"] = is_sick
+# flags
+df_attendance["is_doctor"] = is_doctor
+df_attendance["is_training"] = is_training
+df_attendance["is_sick"] = is_sick
+df_attendance["is_businesstrip"] = is_businesstrip
+
+df_attendance["is_vacation"] = (
+    df_attendance["type"].eq("vacation")
+)
+
+df_attendance["is_paid_absence"] = (
+    df_attendance["type"].eq("paidabsent")
+)
 
 # keys, join 
 df_dim_users = df_users.rename(columns={
     "id": "user_id"
-})
+}).copy()
 df_attendance = df_attendance.rename(columns={
     "user": "user_id"
-})
+}).copy()
 
+# handle archived users
+df_dim_users["is_currently_active"] = (
+    ~df_dim_users["archived"].fillna(False)
+)
 
-# select clean needed cols
-attendance_cols = [
-    "id", "user_id", "date", "type", "note", "status_flag", "Doctor", 
-    "Training", "SickLeave", "from", "to", "hours_worked", "hours_paused",
-    "lunch", "manual", "wage"
+schedule_parts = (
+    df_dim_users["schedule"]
+    .fillna("0,0,0,0,0")
+    .astype(str)
+    .str.split(",", expand=True)
+)
+
+# error checks --------------------------------------
+if schedule_parts.shape[1] != 5:
+    invalid_schedule_rows = df_dim_users.loc[
+        schedule_parts.notna().sum(axis=1) != 5,
+        ["user_id", "schedule"],
+    ]
+
+    raise ValueError(
+        "Every schedule must contain exactly five values "
+        "(Monday-Friday).\n"
+        + invalid_schedule_rows.to_string(index=False)
+    )
+
+schedule_parts = schedule_parts.apply(
+    pd.to_numeric,
+    errors="coerce",
+)
+
+if schedule_parts.isna().any().any():
+    invalid_schedule_rows = df_dim_users.loc[
+        schedule_parts.isna().any(axis=1),
+        ["user_id", "schedule"],
+    ]
+
+    raise ValueError(
+        "Some schedule values could not be converted to numbers:\n"
+        + invalid_schedule_rows.to_string(index=False)
+    )
+# --------------------------------------------------------
+
+schedule_parts.columns = [
+    "planned_monday",
+    "planned_tuesday",
+    "planned_wednesday",
+    "planned_thursday",
+    "planned_friday",
 ]
 
-df_attendance = df_attendance[attendance_cols]
+df_dim_users = pd.concat(
+    [
+        df_dim_users.reset_index(drop=True),
+        schedule_parts.reset_index(drop=True),
+    ],
+    axis=1,
+)
+
+schedule_columns = [
+    "planned_monday",
+    "planned_tuesday",
+    "planned_wednesday",
+    "planned_thursday",
+    "planned_friday",
+]
+
+df_dim_users["weekly_planned_hours"] = (
+    df_dim_users[schedule_columns].sum(axis=1)
+)
+
+# False for schedules such as "0,0,0,0,0".
+# These employees will be excluded from schedule-dependent calculations.
+df_dim_users["has_calculable_schedule"] = (
+    df_dim_users["weekly_planned_hours"] > 0
+)
+
+# validation for logging
+# does obligation contract match scheduled hours?
+# JUST FOR LOG
+df_dim_users["expected_weekly_hours_from_obligation"] = (
+    pd.to_numeric(
+        df_dim_users["obligation"],
+        errors="coerce",
+    ).fillna(0)
+    * 40
+)
+
+df_dim_users["schedule_obligation_difference"] = (
+    df_dim_users["weekly_planned_hours"]
+    - df_dim_users["expected_weekly_hours_from_obligation"]
+)
+
+schedule_mismatches = df_dim_users.loc[
+    df_dim_users["schedule_obligation_difference"].abs() > 0.01,
+    [
+        "user_id",
+        "obligation",
+        "schedule",
+        "weekly_planned_hours",
+        "expected_weekly_hours_from_obligation",
+        "schedule_obligation_difference",
+    ],
+]
+
+if not schedule_mismatches.empty:
+    logger.warning(
+        "Schedules not matching contractual obligation:\n%s",
+        schedule_mismatches.to_string(index=False),
+    )
+
+
 
 # keep only valid type subcategories ("note")
 valid_notes = [
@@ -170,75 +278,397 @@ df_attendance["to"] = np.where(
     df_attendance["to"]
 )
 
-# PRIMARY TYPE
-# EXPLAINER: There can occur an edge case where a person has both "homeoffice" and "present" types where we have to determine which is dominant, the more hours worked in a specific "type" will be the PRIMARY TYPE
-
-df_attendance["_is_present_entry"] = (df_attendance["type"] == "present") & (
-    (df_attendance["hours_worked"] > 0) | (df_attendance["from"].notna())
-)
-df_attendance["_is_ho_entry"] = (df_attendance["type"] == "homeoffice") & (
-    (df_attendance["hours_worked"] > 0) | (df_attendance["from"].notna())
-)
-
-present_hrs = np.where(df_attendance["type"] == "present", df_attendance["hours_worked"], 0.0)
-ho_hrs = np.where(df_attendance["type"] == "homeoffice", df_attendance["hours_worked"], 0.0)
-
-# 2. Attach temporarily or group directly using pandas.NamedAgg / assign
-daily_summary = (
-    df_attendance
-    .assign(_present=present_hrs, _ho=ho_hrs)
-    .groupby(["user_id", "date"], as_index=False)
-    .agg(
-        present_hrs=("_present", "sum"),
-        ho_hrs=("_ho", "sum"),
-        has_present_entry=("_is_present_entry", "any"),
-        has_ho_entry=("_is_ho_entry", "any"),
-        is_sick=("SickLeave", "any")
-    )
-)
-
-def assign_primary_type(row):
-    if row["is_sick"]:
-        return "Sick Leave"
-    
-    # Priority 1: Check completed hours worked
-    elif row["present_hrs"] > 0 and row["present_hrs"] >= row["ho_hrs"]:
-        return "In-Office"
-    elif row["ho_hrs"] > 0 and row["ho_hrs"] > row["present_hrs"]:
-        return "Home Office"
-    
-    # Priority 2: Fallback for Active/Unclosed Shifts today (where hours_worked is 0.0)
-    elif row["has_present_entry"]:
-        return "In-Office"
-    elif row["has_ho_entry"]:
-        return "Home Office"
-    
-    else:
-        return "Out of Office"
-
-daily_summary["primary_type"] = daily_summary.apply(assign_primary_type, axis=1)
-df_attendance = df_attendance.drop(columns=["_is_present_entry", "_is_ho_entry"]) # clean up helper cols
-
-# merge back
-df_attendance = df_attendance.merge(
-    daily_summary[["user_id", "date", "primary_type"]],
-    on=["user_id", "date"],
-    how="left"
-)
-
 # select final clean columns for PBI
 attendance_cols = [
-    "id", "user_id", "date", "type", "primary_type", "note", "status_flag", 
-    "Doctor", "Training", "SickLeave", "from", "to", "hours_worked", 
-    "hours_paused", "lunch", "manual", "wage"
+    "id",
+    "user_id",
+    "date",
+    "type",
+    "note",
+    "status_flag",
+
+    "is_doctor",
+    "is_training",
+    "is_sick",
+    "is_businesstrip",
+    "is_vacation",
+    "is_paid_absence",
+
+    "from",
+    "to",
+    "hours_worked",
+    "hours_paused",
+    "lunch",
+    "manual",
+    "wage",
 ]
+
 df_attendance = df_attendance[attendance_cols]
 
 
 
-# export to csv
+# Fact table splitting
+
+# first: one row per each attendance time/event entry (basically copy of df_attendance)
+df_fact_attendance_event = df_attendance.copy()
+
+# further data processing for df_fact_attendance_event table
+# create unique key for every exploded event from original JSON (was missing earlier)
+df_fact_attendance_event["event_number"] = (
+    df_fact_attendance_event.groupby("id", dropna = False).cumcount().add(1)
+)
+
+df_fact_attendance_event["attendance_event_key"] = (
+    df_fact_attendance_event["id"].astype("string")
+    + "-"
+    + df_fact_attendance_event["event_number"].astype("string")
+)
+
+# additional event flags
+df_fact_attendance_event["is_present_entry"] = (
+    df_fact_attendance_event["type"].eq("present")
+    & (
+        df_fact_attendance_event["hours_worked"].gt(0)
+        | df_fact_attendance_event["from"].notna()
+    )
+)
+
+df_fact_attendance_event["is_homeoffice_entry"] = (
+    df_fact_attendance_event["type"].eq("homeoffice")
+    & (
+        df_fact_attendance_event["hours_worked"].gt(0)
+        | df_fact_attendance_event["from"].notna()
+    )
+)
+
+
+# split working hours based on location (present/HO)
+df_fact_attendance_event["office_hours"] = np.where(
+    df_fact_attendance_event["type"].eq("present"),
+    df_fact_attendance_event["hours_worked"],
+    0.0,
+)
+
+df_fact_attendance_event["homeoffice_hours"] = np.where(
+    df_fact_attendance_event["type"].eq("homeoffice"),
+    df_fact_attendance_event["hours_worked"],
+    0.0,
+)
+
+# 2. fact table: user-day
+# one row per user and date that has a recorded event
+
+# aggregates
+df_fact_user_day_recorded = (
+    df_fact_attendance_event
+    .groupby(["user_id", "date"], as_index=False)
+    .agg(
+        office_hours=("office_hours", "sum"),
+        homeoffice_hours=("homeoffice_hours", "sum"),
+        pause_hours=("hours_paused", "sum"),
+
+        has_present_entry=("is_present_entry", "any"),
+        has_homeoffice_entry=("is_homeoffice_entry", "any"),
+
+        has_sick=("is_sick", "any"),
+        has_vacation=("is_vacation", "any"),
+        has_paid_absence=("is_paid_absence", "any"),
+
+        has_business_trip=("is_businesstrip", "any"),
+        has_doctor=("is_doctor", "any"),
+        has_training=("is_training", "any"),
+
+        recorded_event_count=("attendance_event_key", "count"),
+    )
+)
+
+# total hrs worked aggregate
+df_fact_user_day_recorded["total_work_hours"] = (
+    df_fact_user_day_recorded["office_hours"]
+    + df_fact_user_day_recorded["homeoffice_hours"]
+)
+
+# flag for mixed location workdays
+df_fact_user_day_recorded["is_mixed_location"] = (
+    df_fact_user_day_recorded["has_present_entry"]
+    & df_fact_user_day_recorded["has_homeoffice_entry"]
+)
+
+# assign day status
+def assign_day_status(row: pd.Series) -> str:
+    """
+    Assign one headline status to a day containing at least one
+    source-system attendance record.
+    """
+
+    if row["has_sick"]:
+        return "Sick Leave"
+
+    if row["has_vacation"]:
+        return "Vacation"
+
+    if row["has_paid_absence"]:
+        return "Paid Absence"
+
+    if row["is_mixed_location"]:
+        return "Mixed Office / Home Office"
+
+    if (
+        row["office_hours"] > 0
+        or row["has_present_entry"]
+    ):
+        return "In-Office"
+
+    if (
+        row["homeoffice_hours"] > 0
+        or row["has_homeoffice_entry"]
+    ):
+        return "Home Office"
+
+    if row["has_business_trip"]:
+        return "Business Trip"
+
+    return "Other Recorded Event"
+
+
+df_fact_user_day_recorded["day_status"] = (
+    df_fact_user_day_recorded.apply(
+        assign_day_status,
+        axis=1,
+    )
+)
+
+# employee active ranges, historic
+today = pd.Timestamp.today().date()
+minimum_data_date = df_fact_user_day_recorded["date"].min()
+
+recorded_ranges = (
+    df_fact_user_day_recorded
+    .groupby("user_id", as_index=False)
+    .agg(
+        first_recorded_date=("date", "min"),
+        last_recorded_date=("date", "max"),
+    )
+)
+
+df_dim_users = df_dim_users.merge(
+    recorded_ranges,
+    on="user_id",
+    how="left",
+)
+
+if "startDate" not in df_dim_users.columns:
+    raise ValueError(
+        "dim_users does not contain the expected startDate column."
+    )
+
+df_dim_users["employment_start_date"] = (
+    pd.to_datetime(
+        df_dim_users["startDate"],
+        errors="coerce",
+    ).dt.date
+)
+
+df_dim_users["active_from"] = (
+    df_dim_users["employment_start_date"]
+    .combine_first(df_dim_users["first_recorded_date"])
+)
+
+# The API extraction starts in 2024, so do not generate older rows.
+df_dim_users["active_from"] = df_dim_users["active_from"].apply(
+    lambda value: (
+        max(value, minimum_data_date)
+        if pd.notna(value)
+        else minimum_data_date
+    )
+)
+
+df_dim_users["active_to"] = today
+
+archived_users = ~df_dim_users["is_currently_active"]
+
+# Approximation until an actual employment-end field is available.
+df_dim_users.loc[archived_users, "active_to"] = (
+    df_dim_users.loc[archived_users, "last_recorded_date"]
+)
+
+# employee-day spine
+holiday_dates = set(
+    pd.to_datetime(
+        df_holidays["date"],
+        errors="coerce",
+    )
+    .dropna()
+    .dt.date
+)
+
+expected_rows = []
+
+eligible_users = df_dim_users.loc[
+    df_dim_users["has_calculable_schedule"]
+    & df_dim_users["active_from"].notna()
+    & df_dim_users["active_to"].notna()
+].copy()
+
+for user in eligible_users.itertuples(index=False):
+
+    weekly_schedule = [
+        user.planned_monday,
+        user.planned_tuesday,
+        user.planned_wednesday,
+        user.planned_thursday,
+        user.planned_friday,
+    ]
+
+    employee_dates = pd.date_range(
+        start=user.active_from,
+        end=user.active_to,
+        freq="D",
+    )
+
+    for timestamp in employee_dates:
+
+        date_value = timestamp.date()
+        weekday_index = timestamp.weekday()
+
+        # Saturday or Sunday
+        if weekday_index >= 5:
+            continue
+
+        # Public holiday
+        if date_value in holiday_dates:
+            continue
+
+        planned_hours = float(
+            weekly_schedule[weekday_index]
+        )
+
+        # A zero in an otherwise valid schedule means the person
+        # is known not to be scheduled that weekday.
+        if planned_hours <= 0:
+            continue
+
+        expected_rows.append(
+            {
+                "user_id": user.user_id,
+                "date": date_value,
+                "planned_hours": planned_hours,
+            }
+        )
+
+df_expected_user_day = pd.DataFrame(expected_rows)
+
+
+# final employee day fact
+df_fact_user_day = df_expected_user_day.merge(
+    df_fact_user_day_recorded,
+    on=["user_id", "date"],
+    how="outer",
+)
+
+df_fact_user_day = df_fact_user_day.merge(
+    df_dim_users[
+        [
+            "user_id",
+            "has_calculable_schedule",
+            "is_currently_active",
+        ]
+    ],
+    on="user_id",
+    how="left",
+)
+
+
+# A recorded weekend/unscheduled day for a fixed-schedule employee
+# has known planned hours of zero.
+fixed_unscheduled_mask = (
+    df_fact_user_day["planned_hours"].isna()
+    & df_fact_user_day["has_calculable_schedule"].fillna(False)
+)
+
+df_fact_user_day.loc[
+    fixed_unscheduled_mask,
+    "planned_hours",
+] = 0.0
+
+
+# export
+event_columns = [
+    "attendance_event_key",
+    "id",
+    "event_number",
+    "user_id",
+    "date",
+    "type",
+    "note",
+    "status_flag",
+    "from",
+    "to",
+
+    "hours_worked",
+    "office_hours",
+    "homeoffice_hours",
+    "hours_paused",
+
+    "is_doctor",
+    "is_training",
+    "is_sick",
+    "is_businesstrip",
+    "is_vacation",
+    "is_paid_absence",
+    "is_explicit_absent_marker",
+
+    "is_present_entry",
+    "is_homeoffice_entry",
+
+    "lunch",
+    "manual",
+    "wage",
+]
+
+df_fact_attendance_event = (
+    df_fact_attendance_event[event_columns]
+    .sort_values(["date", "user_id", "attendance_event_key"])
+    .reset_index(drop=True)
+)
+
+# Select user-day columns
+recorded_user_day_columns = [
+    "user_id",
+    "date",
+
+    "office_hours",
+    "homeoffice_hours",
+    "total_work_hours",
+    "pause_hours",
+
+    "has_present_entry",
+    "has_homeoffice_entry",
+    "is_mixed_location",
+
+    "has_sick",
+    "has_vacation",
+    "has_paid_absence",
+    "has_explicit_absent_marker",
+    "has_business_trip",
+    "has_doctor",
+    "has_training",
+
+    "recorded_event_count",
+    "day_status",
+]
+
+df_fact_user_day_recorded = (
+    df_fact_user_day_recorded[recorded_user_day_columns]
+    .sort_values(["date", "user_id"])
+    .reset_index(drop=True)
+)
+
+
+# to csv
 df_dim_users.to_csv(PROCESSED_DATA_DIR / "dim_users.csv", index=False, encoding="utf-8-sig")
-df_attendance.to_csv(PROCESSED_DATA_DIR / "fact_attendance.csv", index=False, encoding="utf-8-sig")
+df_fact_attendance_event.to_csv(PROCESSED_DATA_DIR / "fact_attendance_event.csv", index=False, encoding="utf-8-sig")
+df_fact_user_day_recorded.to_csv(PROCESSED_DATA_DIR / "fact_user_day.csv", index=False, encoding="utf-8-sig")
 df_holidays.to_csv(PROCESSED_DATA_DIR / "dim_holidays.csv", index=False, encoding="utf-8-sig")
 
 
@@ -263,3 +693,15 @@ print(missing_to_with_from["type"].value_counts(dropna=False))
 
 df_attendance["note"].value_counts()
 df_attendance["type"].value_counts()
+
+
+
+
+
+
+
+
+
+print(df_attendance["type"].value_counts(dropna=False))
+print(df_dim_users[["obligation", "schedule"]].head(20).to_string())
+print(df_dim_users["schedule"].value_counts(dropna=False))

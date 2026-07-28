@@ -312,6 +312,15 @@ df_attendance = df_attendance[attendance_cols]
 # first: one row per each attendance time/event entry (basically copy of df_attendance)
 df_fact_attendance_event = df_attendance.copy()
 
+# add flags
+df_fact_attendance_event["has_present_status"] = (
+    df_fact_attendance_event["type"].eq("present")
+)
+
+df_fact_attendance_event["has_homeoffice_status"] = (
+    df_fact_attendance_event["type"].eq("homeoffice")
+)
+
 # further data processing for df_fact_attendance_event table
 # create unique key for every exploded event from original JSON (was missing earlier)
 df_fact_attendance_event["event_number"] = (
@@ -378,6 +387,9 @@ df_fact_user_day_recorded = (
         has_doctor=("is_doctor", "any"),
         has_training=("is_training", "any"),
 
+        has_present_status=("has_present_status", "any"),
+        has_homeoffice_status=("has_homeoffice_status", "any"),
+
         recorded_event_count=("attendance_event_key", "count"),
     )
 )
@@ -392,50 +404,6 @@ df_fact_user_day_recorded["total_work_hours"] = (
 df_fact_user_day_recorded["is_mixed_location"] = (
     df_fact_user_day_recorded["has_present_entry"]
     & df_fact_user_day_recorded["has_homeoffice_entry"]
-)
-
-# assign day status
-def assign_day_status(row: pd.Series) -> str:
-    """
-    Assign one headline status to a day containing at least one
-    source-system attendance record.
-    """
-
-    if row["has_sick"]:
-        return "Sick Leave"
-
-    if row["has_vacation"]:
-        return "Vacation"
-
-    if row["has_paid_absence"]:
-        return "Paid Absence"
-
-    if row["is_mixed_location"]:
-        return "Mixed Office / Home Office"
-
-    if (
-        row["office_hours"] > 0
-        or row["has_present_entry"]
-    ):
-        return "In-Office"
-
-    if (
-        row["homeoffice_hours"] > 0
-        or row["has_homeoffice_entry"]
-    ):
-        return "Home Office"
-
-    if row["has_business_trip"]:
-        return "Business Trip"
-
-    return "Other Recorded Event"
-
-
-df_fact_user_day_recorded["day_status"] = (
-    df_fact_user_day_recorded.apply(
-        assign_day_status,
-        axis=1,
-    )
 )
 
 # employee active ranges, historic
@@ -616,7 +584,6 @@ event_columns = [
     "is_businesstrip",
     "is_vacation",
     "is_paid_absence",
-    "is_explicit_absent_marker",
 
     "is_present_entry",
     "is_homeoffice_entry",
@@ -632,15 +599,189 @@ df_fact_attendance_event = (
     .reset_index(drop=True)
 )
 
-# Select user-day columns
-recorded_user_day_columns = [
+numeric_columns = [
+    "office_hours",
+    "homeoffice_hours",
+    "pause_hours",
+    "recorded_event_count",
+]
+
+for column in numeric_columns:
+    df_fact_user_day[column] = (
+        pd.to_numeric(
+            df_fact_user_day[column],
+            errors="coerce",
+        )
+        .fillna(0)
+    )
+
+boolean_columns = [
+    "has_present_entry",
+    "has_homeoffice_entry",
+    "has_sick",
+    "has_vacation",
+    "has_paid_absence",
+    "has_business_trip",
+    "has_doctor",
+    "has_training",
+    "is_mixed_location",
+]
+
+for column in boolean_columns:
+    df_fact_user_day[column] = (
+        df_fact_user_day[column]
+        .fillna(False)
+        .astype(bool)
+    )
+
+
+df_fact_user_day["weekday_number"] = (
+    pd.to_datetime(df_fact_user_day["date"])
+    .dt.weekday
+    .add(1)
+)
+
+df_fact_user_day["is_holiday"] = (
+    df_fact_user_day["date"].isin(holiday_dates)
+)
+
+df_fact_user_day["is_expected_workday"] = (
+    df_fact_user_day["planned_hours"].gt(0)
+)
+
+df_fact_user_day["has_recorded_event"] = (
+    df_fact_user_day["recorded_event_count"] > 0
+)
+
+df_fact_user_day["is_missing_record"] = (
+    df_fact_user_day["is_expected_workday"]
+    & ~df_fact_user_day["has_recorded_event"]
+)
+
+df_fact_user_day["total_work_hours"] = (
+    df_fact_user_day["office_hours"]
+    + df_fact_user_day["homeoffice_hours"]
+)
+
+df_fact_user_day["is_mixed_location"] = (
+    df_fact_user_day["has_present_entry"]
+    & df_fact_user_day["has_homeoffice_entry"]
+)
+
+
+# separate classifiactions
+def assign_work_location(row: pd.Series) -> str:
+
+    if (
+        row["has_present_status"]
+        and row["has_homeoffice_status"]
+    ):
+        if row["homeoffice_hours"] > row["office_hours"]:
+            return "Home Office"
+
+        return "In-Office"
+
+    if row["has_homeoffice_status"]:
+        return "Home Office"
+
+    if row["has_present_status"]:
+        return "In-Office"
+
+    return "No Location Work"
+
+
+df_fact_user_day["work_location_status"] = (
+    df_fact_user_day.apply(
+        assign_work_location,
+        axis=1,
+    )
+)
+
+def assign_day_status(row: pd.Series) -> str:
+    """
+    Assign one mutually exclusive headline status.
+    """
+
+    if row["has_sick"]:
+        return "Sick"
+
+    if row["has_vacation"]:
+        return "Vacation"
+
+    if row["has_business_trip"]:
+        return "Business Trip"
+
+    if row["work_location_status"] == "Home Office":
+        return "Home Office"
+
+    if row["work_location_status"] == "In-Office":
+        return "In-Office"
+
+    if row["has_paid_absence"]:
+        return "Paid Absence"
+
+    return "Other / Not In"
+
+
+df_fact_user_day["day_status"] = (
+    df_fact_user_day.apply(
+        assign_day_status,
+        axis=1,
+    )
+)
+
+# for introductory cards
+def assign_card_status(row: pd.Series) -> str:
+    """
+    Mutually exclusive status for today's workforce cards.
+    Physical office presence takes priority.
+    """
+
+    if row["has_present_entry"]:
+        return "In-Office"
+
+    if row["has_homeoffice_entry"]:
+        return "Home Office"
+
+    if row["has_business_trip"]:
+        return "Business Trip"
+
+    if row["has_sick"]:
+        return "Sick"
+
+    if row["has_vacation"]:
+        return "Vacation"
+
+    if row["has_paid_absence"]:
+        return "Paid Absence"
+
+    return "Other / Not In"
+
+
+df_fact_user_day["card_status"] = (
+    df_fact_user_day.apply(assign_card_status, axis=1)
+)
+
+# finalisaton, columns and validation
+user_day_columns = [
     "user_id",
     "date",
+    "weekday_number",
+
+    "has_calculable_schedule",
+    "is_currently_active",
+    "planned_hours",
+    "is_expected_workday",
+    "is_holiday",
 
     "office_hours",
     "homeoffice_hours",
     "total_work_hours",
     "pause_hours",
+
+    "has_recorded_event",
+    "recorded_event_count",
+    "is_missing_record",
 
     "has_present_entry",
     "has_homeoffice_entry",
@@ -649,26 +790,40 @@ recorded_user_day_columns = [
     "has_sick",
     "has_vacation",
     "has_paid_absence",
-    "has_explicit_absent_marker",
     "has_business_trip",
     "has_doctor",
     "has_training",
 
-    "recorded_event_count",
+    "work_location_status",
     "day_status",
 ]
 
-df_fact_user_day_recorded = (
-    df_fact_user_day_recorded[recorded_user_day_columns]
+df_fact_user_day = (
+    df_fact_user_day[user_day_columns]
     .sort_values(["date", "user_id"])
     .reset_index(drop=True)
 )
+
+# validation
+if df_fact_user_day.duplicated(
+    ["user_id", "date"]
+).any():
+    raise ValueError(
+        "Duplicate user-date rows found in fact_user_day."
+    )
+
+if not df_fact_attendance_event[
+    "attendance_event_key"
+].is_unique:
+    raise ValueError(
+        "attendance_event_key is not unique."
+    )
 
 
 # to csv
 df_dim_users.to_csv(PROCESSED_DATA_DIR / "dim_users.csv", index=False, encoding="utf-8-sig")
 df_fact_attendance_event.to_csv(PROCESSED_DATA_DIR / "fact_attendance_event.csv", index=False, encoding="utf-8-sig")
-df_fact_user_day_recorded.to_csv(PROCESSED_DATA_DIR / "fact_user_day.csv", index=False, encoding="utf-8-sig")
+df_fact_user_day.to_csv(PROCESSED_DATA_DIR / "fact_user_day.csv", index=False, encoding="utf-8-sig")
 df_holidays.to_csv(PROCESSED_DATA_DIR / "dim_holidays.csv", index=False, encoding="utf-8-sig")
 
 

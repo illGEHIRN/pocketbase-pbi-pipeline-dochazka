@@ -76,12 +76,13 @@ businesstrips = [
 time_from = pd.to_timedelta(df_attendance["from"] + ":00", errors="coerce")
 time_to = pd.to_timedelta(df_attendance["to"] + ":00", errors="coerce")
 
-raw_duration = round(((time_to - time_from).dt.total_seconds() / 3600), 1)
+raw_duration = (time_to - time_from).dt.total_seconds() / 3600
 
 # create dummies
 is_working = df_attendance["type"].isin(working_types)
 is_businesstrip = df_attendance["type"].isin(businesstrips)
 is_pause = df_attendance["type"] == "pause"
+is_vacation = df_attendance["type"] == "vacation"
 is_doctor = df_attendance["note"] == "Lékař"
 is_training = df_attendance["note"] == "Školení"
 is_unclosed = df_attendance["from"].notna() & df_attendance["to"].isna()
@@ -100,6 +101,13 @@ df_attendance["hours_paused"] = np.where(
     is_pause & ~is_unclosed,
     raw_duration.fillna(0),
     0.0
+)
+
+# calculate vacation hours
+df_attendance["vacation_hours"] = np.where(
+    is_vacation & ~is_unclosed,
+    raw_duration.fillna(0),
+    0.0,
 )
 
 conditions = [is_unclosed & is_working,
@@ -129,9 +137,7 @@ df_attendance["is_training"] = is_training
 df_attendance["is_sick"] = is_sick
 df_attendance["is_businesstrip"] = is_businesstrip
 
-df_attendance["is_vacation"] = (
-    df_attendance["type"].eq("vacation")
-)
+df_attendance["is_vacation"] = is_vacation
 
 df_attendance["is_paid_absence"] = (
     df_attendance["type"].eq("paidabsent")
@@ -298,6 +304,7 @@ attendance_cols = [
     "to",
     "hours_worked",
     "hours_paused",
+    "vacation_hours",
     "lunch",
     "manual",
     "wage",
@@ -375,6 +382,7 @@ df_fact_user_day_recorded = (
         office_hours=("office_hours", "sum"),
         homeoffice_hours=("homeoffice_hours", "sum"),
         pause_hours=("hours_paused", "sum"),
+        vacation_hours=("vacation_hours", "sum"),
 
         has_present_entry=("is_present_entry", "any"),
         has_homeoffice_entry=("is_homeoffice_entry", "any"),
@@ -540,25 +548,55 @@ df_fact_user_day = df_fact_user_day.merge(
             "user_id",
             "has_calculable_schedule",
             "is_currently_active",
+            "planned_monday",
+            "planned_tuesday",
+            "planned_wednesday",
+            "planned_thursday",
+            "planned_friday",
         ]
     ],
     on="user_id",
     how="left",
 )
 
+df_fact_user_day["weekday_number"] = (
+    pd.to_datetime(df_fact_user_day["date"])
+    .dt.weekday
+    .add(1)
+)
 
-# A recorded weekend/unscheduled day for a fixed-schedule employee
-# has known planned hours of zero.
-fixed_unscheduled_mask = (
+derived_planned_hours = np.select(
+    [
+        df_fact_user_day["weekday_number"].eq(1),
+        df_fact_user_day["weekday_number"].eq(2),
+        df_fact_user_day["weekday_number"].eq(3),
+        df_fact_user_day["weekday_number"].eq(4),
+        df_fact_user_day["weekday_number"].eq(5),
+    ],
+    [
+        df_fact_user_day["planned_monday"],
+        df_fact_user_day["planned_tuesday"],
+        df_fact_user_day["planned_wednesday"],
+        df_fact_user_day["planned_thursday"],
+        df_fact_user_day["planned_friday"],
+    ],
+    default=0.0,
+)
+
+missing_planned = (
     df_fact_user_day["planned_hours"].isna()
     & df_fact_user_day["has_calculable_schedule"].fillna(False)
 )
 
 df_fact_user_day.loc[
-    fixed_unscheduled_mask,
+    df_fact_user_day["date"].isin(holiday_dates),
     "planned_hours",
 ] = 0.0
 
+df_fact_user_day.loc[
+    missing_planned,
+    "planned_hours",
+] = derived_planned_hours[missing_planned]
 
 # export
 event_columns = [
@@ -577,6 +615,7 @@ event_columns = [
     "office_hours",
     "homeoffice_hours",
     "hours_paused",
+    "vacation_hours",
 
     "is_doctor",
     "is_training",
@@ -603,6 +642,7 @@ numeric_columns = [
     "office_hours",
     "homeoffice_hours",
     "pause_hours",
+    "vacation_hours",
     "recorded_event_count",
 ]
 
@@ -618,6 +658,8 @@ for column in numeric_columns:
 boolean_columns = [
     "has_present_entry",
     "has_homeoffice_entry",
+    "has_present_status",
+    "has_homeoffice_status",
     "has_sick",
     "has_vacation",
     "has_paid_absence",
@@ -732,15 +774,10 @@ df_fact_user_day["day_status"] = (
 
 # for introductory cards
 def assign_card_status(row: pd.Series) -> str:
-    """
-    Mutually exclusive status for today's workforce cards.
-    Physical office presence takes priority.
-    """
-
-    if row["has_present_entry"]:
+    if row["has_present_status"]:
         return "In-Office"
 
-    if row["has_homeoffice_entry"]:
+    if row["has_homeoffice_status"]:
         return "Home Office"
 
     if row["has_business_trip"]:
@@ -760,6 +797,16 @@ def assign_card_status(row: pd.Series) -> str:
 
 df_fact_user_day["card_status"] = (
     df_fact_user_day.apply(assign_card_status, axis=1)
+)
+
+# determine full vacation day
+df_fact_user_day["vacation_day_equivalent"] = np.where(
+    df_fact_user_day["planned_hours"].gt(0),
+    (
+        df_fact_user_day["vacation_hours"]
+        / df_fact_user_day["planned_hours"]
+    ).clip(upper=1),
+    np.nan,
 )
 
 # finalisaton, columns and validation
@@ -794,9 +841,15 @@ user_day_columns = [
     "has_doctor",
     "has_training",
 
+    "vacation_hours",
+    "vacation_day_equivalent",
+    "has_present_status",
+    "has_homeoffice_status",
+
     "work_location_status",
     "day_status",
-]
+    "card_status",
+    ]
 
 df_fact_user_day = (
     df_fact_user_day[user_day_columns]
@@ -832,6 +885,8 @@ df_holidays.to_csv(PROCESSED_DATA_DIR / "dim_holidays.csv", index=False, encodin
 
 
 
+
+
 #################################################################################################
 
 
@@ -860,3 +915,39 @@ df_attendance["type"].value_counts()
 print(df_attendance["type"].value_counts(dropna=False))
 print(df_dim_users[["obligation", "schedule"]].head(20).to_string())
 print(df_dim_users["schedule"].value_counts(dropna=False))
+
+
+
+
+
+
+
+
+
+
+
+user_idd = "6grzczss35nwgkh"
+
+check_user = df_dim_users.loc[
+    df_dim_users["user_id"].eq(user_idd),
+    [
+        "user_id",
+        "name",
+        "schedule",
+        "has_calculable_schedule",
+        "is_currently_active",
+        "active_from",
+        "active_to",
+    ],
+]
+
+print(check_user.to_string(index=False))
+
+check_user_id = check_user["user_id"].iloc[0]
+
+print(
+    df_expected_user_day.loc[
+        (df_expected_user_day["user_id"] == check_user_id)
+        & (df_expected_user_day["date"] == today)
+    ].to_string(index=False)
+)

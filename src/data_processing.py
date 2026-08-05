@@ -89,6 +89,18 @@ is_unclosed = df_attendance["from"].notna() & df_attendance["to"].isna()
 is_homeoffice = df_attendance["type"] == "homeoffice"
 is_sick = df_attendance["type"] == "sick"
 
+# Normalize wage to a real boolean.
+df_attendance["wage"] = (
+    df_attendance["wage"]
+    .fillna(False)
+    .astype(str)
+    .str.strip()
+    .str.lower()
+    .isin(["true", "1", "yes", "ano"])
+)
+
+is_wage = df_attendance["wage"]
+
 # working hours (for actual work types)
 df_attendance["hours_worked"] = np.where(
     is_working & ~is_unclosed,
@@ -101,6 +113,15 @@ df_attendance["hours_paused"] = np.where(
     is_pause & ~is_unclosed,
     raw_duration.fillna(0),
     0.0
+)
+
+# calculate wage hours which may include pauses etc
+df_attendance["wage_hours"] = np.where(
+    is_wage
+    & ~is_working
+    & ~is_unclosed,
+    raw_duration.fillna(0),
+    0.0,
 )
 
 # calculate vacation hours
@@ -304,6 +325,7 @@ attendance_cols = [
     "to",
     "hours_worked",
     "hours_paused",
+    "wage_hours",
     "vacation_hours",
     "lunch",
     "manual",
@@ -313,6 +335,15 @@ attendance_cols = [
 df_attendance = df_attendance[attendance_cols]
 
 
+# standardize lunch to a proper boolean instead of string
+df_attendance["lunch"] = (
+    df_attendance["lunch"]
+    .fillna(False)
+    .astype(str)
+    .str.strip()
+    .str.lower()
+    .isin(["true", "1", "yes", "ano"])
+)
 
 # Fact table splitting
 
@@ -382,6 +413,7 @@ df_fact_user_day_recorded = (
         office_hours=("office_hours", "sum"),
         homeoffice_hours=("homeoffice_hours", "sum"),
         pause_hours=("hours_paused", "sum"),
+        wage_hours=("wage_hours", "sum"),
         vacation_hours=("vacation_hours", "sum"),
 
         has_present_entry=("is_present_entry", "any"),
@@ -395,6 +427,8 @@ df_fact_user_day_recorded = (
         has_doctor=("is_doctor", "any"),
         has_training=("is_training", "any"),
 
+        has_lunch=("lunch", "any"),
+
         has_present_status=("has_present_status", "any"),
         has_homeoffice_status=("has_homeoffice_status", "any"),
 
@@ -402,11 +436,21 @@ df_fact_user_day_recorded = (
     )
 )
 
-# total hrs worked aggregate
+# total hrs worked aggregate (brutto)
 df_fact_user_day_recorded["total_work_hours"] = (
     df_fact_user_day_recorded["office_hours"]
     + df_fact_user_day_recorded["homeoffice_hours"]
 )
+
+# official hours worked with lunch pause substracted if present (netto)
+df_fact_user_day_recorded["official_hours_worked"] = (
+    df_fact_user_day_recorded["total_work_hours"]
+    - np.where(
+        df_fact_user_day_recorded["has_lunch"],
+        0.5,
+        0.0,
+    )
+).clip(lower=0.0)
 
 # flag for mixed location workdays
 df_fact_user_day_recorded["is_mixed_location"] = (
@@ -615,6 +659,7 @@ event_columns = [
     "office_hours",
     "homeoffice_hours",
     "hours_paused",
+    "wage_hours",
     "vacation_hours",
 
     "is_doctor",
@@ -642,6 +687,7 @@ numeric_columns = [
     "office_hours",
     "homeoffice_hours",
     "pause_hours",
+    "wage_hours",
     "vacation_hours",
     "recorded_event_count",
 ]
@@ -660,6 +706,7 @@ boolean_columns = [
     "has_homeoffice_entry",
     "has_present_status",
     "has_homeoffice_status",
+    "has_lunch",
     "has_sick",
     "has_vacation",
     "has_paid_absence",
@@ -704,6 +751,27 @@ df_fact_user_day["total_work_hours"] = (
     df_fact_user_day["office_hours"]
     + df_fact_user_day["homeoffice_hours"]
 )
+
+df_fact_user_day["has_lunch"] = (
+    df_fact_user_day["has_lunch"]
+    .fillna(False)
+    .astype(bool)
+)
+
+df_fact_user_day["official_hours_worked"] = (
+    df_fact_user_day["total_work_hours"]
+    + df_fact_user_day["wage_hours"]
+    - np.where(
+        df_fact_user_day["has_lunch"],
+        0.5,
+        0.0,
+    )
+).clip(lower=0.0)
+
+# rounding to the nearest 0.25 hours
+df_fact_user_day["official_hours_worked"] = (
+    df_fact_user_day["official_hours_worked"] * 4
+).round() / 4
 
 df_fact_user_day["is_mixed_location"] = (
     df_fact_user_day["has_present_entry"]
@@ -824,6 +892,9 @@ user_day_columns = [
     "office_hours",
     "homeoffice_hours",
     "total_work_hours",
+    "has_lunch",
+    "official_hours_worked",
+    "wage_hours",
     "pause_hours",
 
     "has_recorded_event",

@@ -1,10 +1,7 @@
 from pathlib import Path
-from typing import Optional
 import logging
-import numpy as np
 import pandas as pd
 from config import (
-    RAW_DATA_DIR,
     PROCESSED_DATA_DIR
 )
 

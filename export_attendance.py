@@ -1,5 +1,6 @@
 import argparse
 from pathlib import Path
+import unicodedata
 
 import pandas as pd
 
@@ -19,8 +20,11 @@ def parse_arguments() -> argparse.Namespace:
     )
 
     parser.add_argument(
-        "user_id",
-        help="User ID, for example vnfg855sgn5gm5h.",
+        "user_identifier",
+        help=(
+            "Exact user ID or surname without diacritics, all lowercase,"
+            "for example vnfg855sgn5gm5h or boucnik."
+        ),
     )
 
     parser.add_argument(
@@ -46,6 +50,92 @@ def parse_arguments() -> argparse.Namespace:
 
     return parser.parse_args()
 
+def normalize_surname(value: str) -> str:
+    """
+    Convert a surname to lowercase ASCII without diacritics.
+
+    Examples:
+        Boučník -> boucnik
+        Šmatera -> smatera
+        Dvořáková -> dvorakova
+    """
+    normalized = unicodedata.normalize(
+        "NFKD",
+        str(value).strip(),
+    )
+
+    without_diacritics = "".join(
+        character
+        for character in normalized
+        if not unicodedata.combining(character)
+    )
+
+    # Remove spaces, hyphens, apostrophes and other punctuation.
+    return "".join(
+        character
+        for character in without_diacritics.casefold()
+        if character.isalnum()
+    )
+
+
+def resolve_user_id(
+    users: pd.DataFrame,
+    user_identifier: str,
+) -> str:
+    """
+    Resolve either an exact user_id or a normalized surname
+    to one user_id.
+    """
+    identifier = str(user_identifier).strip()
+
+    # First try an exact user_id match.
+    id_matches = users.loc[
+        users["user_id"].astype("string").str.casefold()
+        == identifier.casefold()
+    ]
+
+    if len(id_matches) == 1:
+        return str(id_matches.iloc[0]["user_id"])
+
+    if len(id_matches) > 1:
+        raise ValueError(
+            f"User ID {identifier!r} occurs more than once."
+        )
+
+    # Extract the first part of "Surname Firstname".
+    surname_keys = (
+        users["name"]
+        .fillna("")
+        .astype(str)
+        .str.strip()
+        .str.split()
+        .str[0]
+        .map(normalize_surname)
+    )
+
+    normalized_identifier = normalize_surname(identifier)
+
+    surname_matches = users.loc[
+        surname_keys == normalized_identifier
+    ]
+
+    if surname_matches.empty:
+        raise ValueError(
+            f"No user found for ID or surname {identifier!r}."
+        )
+
+    if len(surname_matches) > 1:
+        candidates = surname_matches[
+            ["name", "user_id"]
+        ].to_string(index=False)
+
+        raise ValueError(
+            f"More than one user has surname {identifier!r}:\n"
+            f"{candidates}\n\n"
+            "Use the exact user_id instead."
+        )
+
+    return str(surname_matches.iloc[0]["user_id"])
 
 def main() -> None:
     args = parse_arguments()
@@ -65,11 +155,16 @@ def main() -> None:
         PROCESSED_DATA_DIR / "dim_holidays.csv",
     )
 
+    selected_user_id = resolve_user_id(
+    users=df_users,
+    user_identifier=args.user_identifier,
+)
+
     report, selected_user = build_user_daily_report(
         users=df_users,
         user_day=df_user_day,
         holidays=df_holidays,
-        selected_user_id=args.user_id,
+        selected_user_id=selected_user_id,
         start_date=args.start_date,
         end_date=args.end_date,
     )
@@ -86,7 +181,7 @@ def main() -> None:
             PROCESSED_DATA_DIR
             / "attendance_exports"
             / (
-                f"{surname}_{args.user_id}_"
+                f"{surname}_{selected_user_id}_"
                 f"{args.start_date}_{args.end_date}.txt"
             )
         )
@@ -94,7 +189,7 @@ def main() -> None:
     export_report_to_txt(
         report=report,
         selected_user=selected_user,
-        selected_user_id=args.user_id,
+        selected_user_id=selected_user_id,
         start_date=args.start_date,
         end_date=args.end_date,
         output_path=output_path,

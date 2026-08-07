@@ -2,6 +2,7 @@ import logging
 import json
 import numpy as np
 import pandas as pd
+from zoneinfo import ZoneInfo
 from config import (
     RAW_DATA_DIR,
     PROCESSED_DATA_DIR
@@ -459,7 +460,10 @@ df_fact_user_day_recorded["is_mixed_location"] = (
 )
 
 # employee active ranges, historic
-today = pd.Timestamp.today().date()
+today = pd.Timestamp.now(
+    tz=ZoneInfo("Europe/Prague")
+).date()
+
 minimum_data_date = df_fact_user_day_recorded["date"].min()
 
 recorded_ranges = (
@@ -1022,3 +1026,15 @@ print(
         & (df_expected_user_day["date"] == today)
     ].to_string(index=False)
 )
+
+
+
+print(
+    df_fact_user_day.loc[
+        df_fact_user_day["date"] == today,
+        ["user_id", "date", "weekday_number", "planned_hours"]
+    ].to_string(index=False)
+)
+
+print("today variable:", today)
+print("actual now:", pd.Timestamp.today().date())

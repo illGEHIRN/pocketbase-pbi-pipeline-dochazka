@@ -53,11 +53,6 @@ def parse_arguments() -> argparse.Namespace:
 def normalize_surname(value: str) -> str:
     """
     Convert a surname to lowercase ASCII without diacritics.
-
-    Examples:
-        Boučník -> boucnik
-        Šmatera -> smatera
-        Dvořáková -> dvorakova
     """
     normalized = unicodedata.normalize(
         "NFKD",

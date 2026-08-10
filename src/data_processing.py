@@ -21,28 +21,6 @@ times_df = pd.json_normalize(df_exploded["times"])
 
 df_attendance = pd.concat([df_exploded.drop(columns=["times"]), times_df], axis=1)
 
-
-
-
-# -----------------------------------------------------------------------------------------
-
-# inspection
-
-# sample if the flattening worked, in JSON format
-sample_flattened = df_attendance.iloc[0].to_dict()
-with open("JSONs/sample_flattened.json", "w", encoding="utf-8") as f:
-    json.dump(sample_flattened, f, indent=2, ensure_ascii=False, default=str)
-
-
-# inspect it in the dataframe column structure...
-print(df_attendance[["date", "user", "from", "to", "type", "wage"]].head(5))
-
-# -----------------------------------------------------------------------------------------
-
-
-
-
-
 # Cleaning, merging types
 
 # print(df_attendance["type"].value_counts())
@@ -248,6 +226,12 @@ df_dim_users["weekly_planned_hours"] = (
 df_dim_users["has_calculable_schedule"] = (
     df_dim_users["weekly_planned_hours"] > 0
 )
+
+# exclude Jirka Petrzelka as hes fully flexible and messes up deviation calculations
+df_dim_users.loc[
+    df_dim_users["user_id"].isin(["qxow5yz51ensi5n"]),
+    "has_calculable_schedule",
+] = False
 
 # validation for logging
 # does obligation contract match scheduled hours?
@@ -646,6 +630,12 @@ df_fact_user_day.loc[
     "planned_hours",
 ] = derived_planned_hours[missing_planned]
 
+# holidays override schedule LAST
+df_fact_user_day.loc[
+    df_fact_user_day["date"].isin(holiday_dates),
+    "planned_hours",
+] = 0.0
+
 # export
 event_columns = [
     "attendance_event_key",
@@ -881,6 +871,28 @@ df_fact_user_day["vacation_day_equivalent"] = np.where(
     np.nan,
 )
 
+
+
+df_fact_user_day["deviation_hours"] = np.where(
+    df_fact_user_day["has_calculable_schedule"]
+    & df_fact_user_day["planned_hours"].notna(),
+
+    df_fact_user_day["official_hours_worked"]
+    - df_fact_user_day["planned_hours"],
+
+    np.nan,
+)
+
+
+df_fact_user_day["overtime_hours"] = (
+    df_fact_user_day["deviation_hours"].clip(lower=0)
+)
+
+df_fact_user_day["undertime_hours"] = (
+    df_fact_user_day["deviation_hours"].clip(upper=0)
+)
+
+
 # finalisaton, columns and validation
 user_day_columns = [
     "user_id",
@@ -900,6 +912,7 @@ user_day_columns = [
     "official_hours_worked",
     "wage_hours",
     "pause_hours",
+    "deviation_hours",
 
     "has_recorded_event",
     "recorded_event_count",

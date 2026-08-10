@@ -11,3 +11,4 @@ logs/
 data/processed/fact_attendance.csv
 PBI Data Model/
 unused-code.txt
+.vscode/

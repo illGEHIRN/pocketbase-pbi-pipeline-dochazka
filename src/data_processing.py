@@ -961,6 +961,136 @@ if not df_fact_attendance_event[
     )
 
 
+# Format and normalize all values/columns for clean import to PBI
+def normalize_bool(series):
+    return (
+        series
+        .fillna(False)
+        .astype(str)
+        .str.strip()
+        .str.lower()
+        .isin(["true", "1", "yes", "ano"])
+        .astype(bool)
+    )
+
+
+# ---------- fact_attendance_event ----------
+
+df_fact_attendance_event["date"] = pd.to_datetime(
+    df_fact_attendance_event["date"],
+    errors="raise"
+).dt.date
+
+df_fact_attendance_event["event_number"] = pd.to_numeric(
+    df_fact_attendance_event["event_number"],
+    errors="raise"
+).astype("int32")
+
+
+event_numeric_columns = [
+    "hours_worked",
+    "office_hours",
+    "homeoffice_hours",
+    "hours_paused",
+    "wage_hours",
+    "vacation_hours",
+]
+
+for col in event_numeric_columns:
+    df_fact_attendance_event[col] = pd.to_numeric(
+        df_fact_attendance_event[col],
+        errors="raise"
+    ).astype("float64")
+
+
+event_boolean_columns = [
+    "is_doctor",
+    "is_training",
+    "is_sick",
+    "is_businesstrip",
+    "is_vacation",
+    "is_paid_absence",
+    "is_present_entry",
+    "is_homeoffice_entry",
+    "lunch",
+    "manual",
+    "wage",
+]
+
+for col in event_boolean_columns:
+    df_fact_attendance_event[col] = normalize_bool(
+        df_fact_attendance_event[col]
+    )
+
+
+event_text_columns = [
+    "attendance_event_key",
+    "id",
+    "user_id",
+    "type",
+    "note",
+    "status_flag",
+]
+
+for col in event_text_columns:
+    df_fact_attendance_event[col] = (
+        df_fact_attendance_event[col].astype("string")
+    )
+
+# ---------- dim_user_days ----------
+dim_user_days_numeric = [
+    "planned_hours",
+    "office_hours",
+    "homeoffice_hours",
+    "total_work_hours",
+    "official_hours_worked",
+    "wage_hours",
+    "pause_hours",
+    "deviation_hours",
+    "vacation_hours",
+    "vacation_day_equivalent"
+]
+
+for col in dim_user_days_numeric:
+    df_fact_user_day[col] = pd.to_numeric(
+        df_fact_user_day[col],
+        errors="raise"
+    ).astype("float64")
+
+
+
+df_fact_user_day["recorded_event_count"] = pd.to_numeric(
+    df_fact_user_day["recorded_event_count"],
+    errors="raise"
+).astype("int32")
+
+
+
+
+# ---------- dim_users ----------
+df_dim_users["obligation"] = pd.to_numeric(
+    df_dim_users["obligation"],
+    errors="raise"
+).astype("float64")
+
+dim_users_numeric_cols = [
+    "planned_monday",
+    "planned_tuesday",
+    "planned_wednesday",
+    "planned_thursday",
+    "planned_friday",
+    "weekly_planned_hours",
+    "expected_weekly_hours_from_obligation",
+    "schedule_obligation_difference"
+]
+
+for col in dim_users_numeric_cols:
+    df_dim_users[col] = pd.to_numeric(
+        df_dim_users[col],
+        errors="raise"
+    ).astype("float64")
+
+
 # to csv
 df_dim_users.to_csv(PROCESSED_DATA_DIR / "dim_users.csv", index=False, encoding="utf-8-sig")
 df_fact_attendance_event.to_csv(PROCESSED_DATA_DIR / "fact_attendance_event.csv", index=False, encoding="utf-8-sig")

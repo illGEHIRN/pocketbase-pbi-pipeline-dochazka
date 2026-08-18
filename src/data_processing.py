@@ -275,6 +275,288 @@ if not schedule_mismatches.empty:
         schedule_mismatches.to_string(index=False),
     )
 
+# ---------- dim_schedule ----------
+schedule_history_path = PROCESSED_DATA_DIR / "dim_schedule.csv"
+
+schedule_history_columns = [
+    "schedule_key",
+    "user_id",
+    "schedule",
+    "planned_monday",
+    "planned_tuesday",
+    "planned_wednesday",
+    "planned_thursday",
+    "planned_friday",
+    "weekly_planned_hours",
+    "has_calculable_schedule",
+    "valid_from",
+    "valid_to",
+    "is_active_schedule",
+]
+
+if schedule_history_path.exists():
+    df_dim_schedule = pd.read_csv(schedule_history_path)
+
+    df_dim_schedule["valid_from"] = (
+        pd.to_datetime(
+            df_dim_schedule["valid_from"],
+            errors="raise",
+        )
+        .dt.date
+        .astype("object")
+    )
+
+    df_dim_schedule["valid_to"] = (
+        pd.to_datetime(
+            df_dim_schedule["valid_to"],
+            errors="coerce",
+        )
+        .dt.date
+        .astype("object")
+    )
+
+else:
+    df_dim_schedule = pd.DataFrame(
+        columns=schedule_history_columns
+    )
+
+
+# current schedules from PocketBase
+df_current_schedules = df_dim_users.loc[
+    df_dim_users["is_currently_active"],
+    [
+        "user_id",
+        "schedule",
+        *schedule_columns,
+        "weekly_planned_hours",
+        "has_calculable_schedule",
+    ],
+].copy()
+
+# initialize schedule history on the first run
+if df_dim_schedule.empty:
+
+    df_dim_schedule = df_current_schedules.copy()
+
+    df_dim_schedule["valid_from"] = today
+    df_dim_schedule["valid_to"] = None
+    df_dim_schedule["is_active_schedule"] = True
+
+    df_dim_schedule["schedule_key"] = (
+        df_dim_schedule["user_id"].astype("string")
+        + "|"
+        + str(today)
+    )
+
+    df_dim_schedule = df_dim_schedule[
+        schedule_history_columns
+    ]
+
+# compare schedules agains previous ones to track if change occurs
+def schedules_equal(history_row, current_row):
+    return np.allclose(
+        [
+            history_row[column]
+            for column in schedule_columns
+        ],
+        [
+            getattr(current_row, column)
+            for column in schedule_columns
+        ],
+        equal_nan=True,
+    )
+
+# detect schedule changes and update history
+
+new_schedule_rows = []
+
+for current in df_current_schedules.itertuples(index=False):
+
+    active_schedule_rows = df_dim_schedule.loc[
+        df_dim_schedule["user_id"].eq(current.user_id)
+        & df_dim_schedule["valid_to"].isna()
+    ]
+
+    if len(active_schedule_rows) > 1:
+        raise ValueError(
+            f"More than one active schedule found for "
+            f"user {current.user_id}."
+        )
+
+    # No active history exists for this user.
+    # This will happen, for example, when a new employee appears.
+    if active_schedule_rows.empty:
+
+        new_schedule_rows.append({
+            "schedule_key": f"{current.user_id}|{today}",
+            "user_id": current.user_id,
+            "schedule": current.schedule,
+            "planned_monday": current.planned_monday,
+            "planned_tuesday": current.planned_tuesday,
+            "planned_wednesday": current.planned_wednesday,
+            "planned_thursday": current.planned_thursday,
+            "planned_friday": current.planned_friday,
+            "weekly_planned_hours": current.weekly_planned_hours,
+            "has_calculable_schedule": current.has_calculable_schedule,
+            "valid_from": today,
+            "valid_to": None,
+            "is_active_schedule": True,
+        })
+
+        logger.info(
+            "Created first schedule record for user %s.",
+            current.user_id,
+        )
+
+        continue
+
+    history_index = active_schedule_rows.index[0]
+    history_row = active_schedule_rows.iloc[0]
+
+    # Nothing changed
+    if schedules_equal(history_row, current):
+        continue
+
+    # Schedule already started today, but changed again today.
+    # At day-level precision we simply replace today's version.
+    if history_row["valid_from"] == today:
+
+        df_dim_schedule.loc[
+            history_index,
+            [
+                "schedule",
+                "planned_monday",
+                "planned_tuesday",
+                "planned_wednesday",
+                "planned_thursday",
+                "planned_friday",
+                "weekly_planned_hours",
+                "has_calculable_schedule",
+            ],
+        ] = [
+            current.schedule,
+            current.planned_monday,
+            current.planned_tuesday,
+            current.planned_wednesday,
+            current.planned_thursday,
+            current.planned_friday,
+            current.weekly_planned_hours,
+            current.has_calculable_schedule,
+        ]
+
+        logger.info(
+            "Updated same-day schedule for user %s.",
+            current.user_id,
+        )
+
+        continue
+
+    # Close the old schedule
+    df_dim_schedule.loc[
+        history_index,
+        "valid_to",
+    ] = yesterday
+
+    df_dim_schedule.loc[
+        history_index,
+        "is_active_schedule",
+    ] = False
+
+    # Prepare the new schedule version
+    new_schedule_rows.append({
+        "schedule_key": f"{current.user_id}|{today}",
+        "user_id": current.user_id,
+        "schedule": current.schedule,
+        "planned_monday": current.planned_monday,
+        "planned_tuesday": current.planned_tuesday,
+        "planned_wednesday": current.planned_wednesday,
+        "planned_thursday": current.planned_thursday,
+        "planned_friday": current.planned_friday,
+        "weekly_planned_hours": current.weekly_planned_hours,
+        "has_calculable_schedule": current.has_calculable_schedule,
+        "valid_from": today,
+        "valid_to": None,
+        "is_active_schedule": True,
+    })
+
+    logger.info(
+        "Schedule change detected for user %s.",
+        current.user_id,
+    )
+
+if new_schedule_rows:
+    df_dim_schedule = pd.concat(
+        [
+            df_dim_schedule,
+            pd.DataFrame(new_schedule_rows),
+        ],
+        ignore_index=True,
+    )
+
+# handle archived users
+# close schedule histories for users who are no longer active
+
+current_active_user_ids = set(
+    df_current_schedules["user_id"]
+)
+
+archived_schedule_mask = (
+    df_dim_schedule["valid_to"].isna()
+    & ~df_dim_schedule["user_id"].isin(
+        current_active_user_ids
+    )
+)
+
+df_dim_schedule.loc[
+    archived_schedule_mask,
+    "valid_to",
+] = yesterday
+
+# edge case
+same_day_archived_mask = (
+    archived_schedule_mask
+    & df_dim_schedule["valid_from"].eq(today)
+)
+
+df_dim_schedule.loc[
+    same_day_archived_mask,
+    "valid_to",
+] = today
+
+# derive active schedules
+df_dim_schedule["is_active_schedule"] = (
+    df_dim_schedule["valid_to"].isna()
+)
+
+
+# validations just in case
+
+# maximum one active schedule per user
+active_schedule_counts = (
+    df_dim_schedule.loc[
+        df_dim_schedule["is_active_schedule"]
+    ]
+    .groupby("user_id")
+    .size()
+)
+
+if (active_schedule_counts > 1).any():
+
+    invalid_users = active_schedule_counts[
+        active_schedule_counts > 1
+    ]
+
+    raise ValueError(
+        "More than one active schedule exists for some users:\n"
+        + invalid_users.to_string()
+    )
+
+# schedule keys must be unique
+if not df_dim_schedule["schedule_key"].is_unique:
+    raise ValueError(
+        "schedule_key is not unique in dim_schedule."
+    )
+
 
 
 # keep only valid type subcategories ("note")
@@ -505,6 +787,97 @@ df_dim_users.loc[archived_users, "active_to"] = (
     df_dim_users.loc[archived_users, "last_recorded_date"]
 )
 
+# expand schedule history to user-date lookup ---------------------------
+
+schedule_ranges = df_dim_schedule.merge(
+    df_dim_users[
+        [
+            "user_id",
+            "active_from",
+            "active_to",
+        ]
+    ],
+    on="user_id",
+    how="left",
+    validate="many_to_one",
+)
+
+schedule_day_rows = []
+
+for schedule in schedule_ranges.itertuples(index=False):
+
+    if (
+        pd.isna(schedule.active_from)
+        or pd.isna(schedule.active_to)
+    ):
+        continue
+
+    # schedule cannot start before the employee was active
+    range_start = max(
+        schedule.valid_from,
+        schedule.active_from,
+    )
+
+    # blank valid_to means that this is the current schedule
+    schedule_end = (
+        schedule.valid_to
+        if pd.notna(schedule.valid_to)
+        else today
+    )
+
+    # schedule cannot extend beyond the employee's active range
+    range_end = min(
+        schedule_end,
+        schedule.active_to,
+    )
+
+    if range_start > range_end:
+        continue
+
+    weekly_schedule = [
+        schedule.planned_monday,
+        schedule.planned_tuesday,
+        schedule.planned_wednesday,
+        schedule.planned_thursday,
+        schedule.planned_friday,
+    ]
+
+    for timestamp in pd.date_range(
+        start=range_start,
+        end=range_end,
+        freq="D",
+    ):
+
+        weekday_index = timestamp.weekday()
+
+        if weekday_index >= 5:
+            planned_hours = 0.0
+        else:
+            planned_hours = float(
+                weekly_schedule[weekday_index]
+            )
+
+        schedule_day_rows.append({
+            "user_id": schedule.user_id,
+            "date": timestamp.date(),
+            "schedule_key": schedule.schedule_key,
+            "planned_hours": planned_hours,
+            "has_calculable_schedule":
+                schedule.has_calculable_schedule,
+        })
+
+
+df_schedule_day = pd.DataFrame(
+    schedule_day_rows,
+    columns=[
+        "user_id",
+        "date",
+        "schedule_key",
+        "planned_hours",
+        "has_calculable_schedule",
+    ],
+)
+
 # employee-day spine
 holiday_dates = set(
     pd.to_datetime(
@@ -517,15 +890,28 @@ holiday_dates = set(
 
 expected_rows = []
 
+# historical schedule by exact user + date
+schedule_day_lookup = (
+    df_schedule_day
+    .set_index(["user_id", "date"])[
+        [
+            "planned_hours",
+            "has_calculable_schedule",
+        ]
+    ]
+    .to_dict(orient="index")
+)
+
+# Do not filter users here by their CURRENT schedule.
+# A user's historical schedule may differ from the current one.
 eligible_users = df_dim_users.loc[
-    df_dim_users["has_calculable_schedule"]
-    & df_dim_users["active_from"].notna()
+    df_dim_users["active_from"].notna()
     & df_dim_users["active_to"].notna()
 ].copy()
 
 for user in eligible_users.itertuples(index=False):
 
-    weekly_schedule = [
+    current_weekly_schedule = [
         user.planned_monday,
         user.planned_tuesday,
         user.planned_wednesday,
@@ -552,12 +938,36 @@ for user in eligible_users.itertuples(index=False):
         if date_value in holiday_dates:
             continue
 
-        planned_hours = float(
-            weekly_schedule[weekday_index]
+        historical_schedule = schedule_day_lookup.get(
+            (user.user_id, date_value)
         )
 
-        # A zero in an otherwise valid schedule means the person
-        # is known not to be scheduled that weekday.
+        if historical_schedule is not None:
+            # We know what the schedule really was on this date.
+            planned_hours = float(
+                historical_schedule["planned_hours"]
+            )
+
+            has_calculable_schedule = bool(
+                historical_schedule[
+                    "has_calculable_schedule"
+                ]
+            )
+
+        else:
+            # No schedule history exists for this date yet.
+            # Keep the old behaviour as a fallback.
+            planned_hours = float(
+                current_weekly_schedule[weekday_index]
+            )
+
+            has_calculable_schedule = bool(
+                user.has_calculable_schedule
+            )
+
+        if not has_calculable_schedule:
+            continue
+
         if planned_hours <= 0:
             continue
 
@@ -602,6 +1012,7 @@ df_fact_user_day["weekday_number"] = (
     .add(1)
 )
 
+# Current schedule fallback for dates before schedule history exists
 derived_planned_hours = np.select(
     [
         df_fact_user_day["weekday_number"].eq(1),
@@ -620,26 +1031,99 @@ derived_planned_hours = np.select(
     default=0.0,
 )
 
-missing_planned = (
-    df_fact_user_day["planned_hours"].isna()
-    & df_fact_user_day["has_calculable_schedule"].fillna(False)
+
+# Add historical schedule information by user and date
+df_fact_user_day = df_fact_user_day.merge(
+    df_schedule_day[
+        [
+            "user_id",
+            "date",
+            "planned_hours",
+            "has_calculable_schedule",
+        ]
+    ].rename(
+        columns={
+            "planned_hours": "historical_planned_hours",
+            "has_calculable_schedule": "historical_has_calculable_schedule",
+        }
+    ),
+    on=["user_id", "date"],
+    how="left",
+    validate="many_to_one",
+)
+
+
+# True when dim_schedule contains a schedule for this exact date
+has_historical_schedule = (
+    df_fact_user_day[
+        "historical_has_calculable_schedule"
+    ].notna()
+)
+
+
+# Where historical schedule exists, use it
+historical_calculable = (
+    df_fact_user_day[
+        "historical_has_calculable_schedule"
+    ]
+    .fillna(False)
+    .astype(bool)
 )
 
 df_fact_user_day.loc[
-    df_fact_user_day["date"].isin(holiday_dates),
+    has_historical_schedule & historical_calculable,
     "planned_hours",
-] = 0.0
+] = df_fact_user_day.loc[
+    has_historical_schedule & historical_calculable,
+    "historical_planned_hours",
+]
+
+
+# Known non-calculable historical schedules should remain without planned hours
+df_fact_user_day.loc[
+    has_historical_schedule & ~historical_calculable,
+    "planned_hours",
+] = np.nan
+
+
+# Also use the historical calculable-schedule flag
+df_fact_user_day.loc[
+    has_historical_schedule,
+    "has_calculable_schedule",
+] = historical_calculable[
+    has_historical_schedule
+]
+
+
+# For dates before schedule history exists, preserve the old behaviour
+missing_planned = (
+    df_fact_user_day["planned_hours"].isna()
+    & ~has_historical_schedule
+    & df_fact_user_day[
+        "has_calculable_schedule"
+    ].fillna(False)
+)
 
 df_fact_user_day.loc[
     missing_planned,
     "planned_hours",
 ] = derived_planned_hours[missing_planned]
 
-# holidays override schedule LAST
+
+# Public holidays always have zero planned hours
 df_fact_user_day.loc[
     df_fact_user_day["date"].isin(holiday_dates),
     "planned_hours",
 ] = 0.0
+
+
+# Temporary merge columns are no longer needed
+df_fact_user_day = df_fact_user_day.drop(
+    columns=[
+        "historical_planned_hours",
+        "historical_has_calculable_schedule",
+    ]
+)
 
 # export
 event_columns = [
@@ -1095,12 +1579,35 @@ for col in dim_users_numeric_cols:
         errors="raise"
     ).astype("float64")
 
+# filter dim_users get rid of redundancy - a lot of cols are handled by new dim_schedule
+df_dim_users_export = df_dim_users.drop(
+    columns=[
+        # schedule data now lives in dim_schedule
+        "schedule",
+        "planned_monday",
+        "planned_tuesday",
+        "planned_wednesday",
+        "planned_thursday",
+        "planned_friday",
+        "weekly_planned_hours",
+        "has_calculable_schedule",
+        "collectionName",
+        "collectionId",
+        "emailVisibility",
+
+        # ETL validation/helper columns only
+        "expected_weekly_hours_from_obligation",
+        "schedule_obligation_difference",
+    ],
+    errors="ignore",
+).copy()
 
 # to csv
-df_dim_users.to_csv(PROCESSED_DATA_DIR / "dim_users.csv", index=False, encoding="utf-8-sig")
+df_dim_users_export.to_csv(PROCESSED_DATA_DIR / "dim_users.csv", index=False, encoding="utf-8-sig")
 df_fact_attendance_event.to_csv(PROCESSED_DATA_DIR / "fact_attendance_event.csv", index=False, encoding="utf-8-sig")
 df_fact_user_day.to_csv(PROCESSED_DATA_DIR / "fact_user_day.csv", index=False, encoding="utf-8-sig")
 df_holidays.to_csv(PROCESSED_DATA_DIR / "dim_holidays.csv", index=False, encoding="utf-8-sig")
+df_dim_schedule.to_csv(PROCESSED_DATA_DIR / "dim_schedule.csv", index=False, encoding="utf-8-sig")
 
 
 # upload data to SQL server..... TO DO

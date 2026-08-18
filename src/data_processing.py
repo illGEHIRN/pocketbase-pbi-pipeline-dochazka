@@ -1,4 +1,5 @@
 import logging
+from datetime import timedelta 
 import json
 import numpy as np
 import pandas as pd
@@ -14,6 +15,13 @@ logger = logging.getLogger("ETL_Logger")
 df_users = pd.read_json(RAW_DATA_DIR / "users_raw.json")
 df_attendance = pd.read_json(RAW_DATA_DIR / "attendance_raw.json")
 df_holidays = pd.read_json(RAW_DATA_DIR / "holidays_raw.json")
+
+# define today and yesterday
+today = pd.Timestamp.now(
+    tz=ZoneInfo("Europe/Prague")
+).date()
+
+yesterday = today - timedelta(days=1)
 
 # explode/flatten the "times" in attendance JSON
 df_exploded = df_attendance.explode("times").reset_index(drop=True)
@@ -444,9 +452,6 @@ df_fact_user_day_recorded["is_mixed_location"] = (
 )
 
 # employee active ranges, historic
-today = pd.Timestamp.now(
-    tz=ZoneInfo("Europe/Prague")
-).date()
 
 minimum_data_date = df_fact_user_day_recorded["date"].min()
 

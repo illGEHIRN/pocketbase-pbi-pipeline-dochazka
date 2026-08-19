@@ -9,6 +9,7 @@ from config import (
     POCKETBASE_ATTENDANCE_URL,
     POCKETBASE_USERS_URL,
     POCKETBASE_HOLIDAY_URL,
+    POCKETBASE_LOGS_URL,
     RAW_DATA_DIR,
 )
 
@@ -124,7 +125,7 @@ class PocketBaseExtractor:
                 total_pages = data.get("totalPages", 1)
                 # print loop to see progress
                 print(
-                    f"Fetched page {page} of total {total_pages} ({len(all_attendance_records)} record total)"
+                    f"Fetched page {page} of total {total_pages} ({len(all_attendance_records)} total records)"
                 )
 
                 if page >= total_pages:
@@ -133,11 +134,66 @@ class PocketBaseExtractor:
                 page += 1  # the page turner
 
             except requests.RequestException as exception:
-                logger.error(f"Failed t fetch attendance on page {page}: {exception}")
+                logger.error(f"Failed to fetch attendance on page {page}: {exception}")
                 raise
 
         logger.info(f"Fetched {len(all_attendance_records)} records")
         return all_attendance_records
+    
+    # fetch logs
+    def fetch_logs(self) -> list:
+        """ Fetch logs from pocketbase, pagination loop needed """
+        logger.info("Fetching logs")
+
+        logs_total_items = (
+            requests.get(POCKETBASE_LOGS_URL, headers=self.headers).json().get("totalItems")
+        )
+        print("Total number of logs:", logs_total_items)
+
+        # fetch actual JSON logs
+        all_logs = []
+        page = 1
+        per_page = 500
+
+        while True:
+            try:
+                params = {
+                    "page": page,
+                    "perPage": per_page,
+                }
+
+                response = requests.get(
+                    POCKETBASE_LOGS_URL,
+                    headers = self.headers,
+                    params = params,
+                    timeout = 200
+                )
+
+                response.raise_for_status()
+
+                data = response.json()
+
+                items = data.get("items", [])
+                all_logs.extend(items)
+
+                total_pages = data.get("totalPages", 1)
+                # print loop to observe progres
+                print(
+                    f"Fetched page {page} of total {total_pages} ({len(all_logs)} total logs)"
+                )
+
+                if page >= total_pages:
+                    break # stop once all pages are parsed through
+
+                page += 1
+
+            except requests.RequestException as exception:
+                logger.error(f"Failed to fetch logs on page {page}: {exception}")
+                raise
+
+        logger.info(f"Fetched {len(all_logs)} logs")
+        
+        return all_logs
 
 
     def save_raw_json(self, data: list, filename: str):
@@ -154,7 +210,9 @@ class PocketBaseExtractor:
         users = self.fetch_users()
         attendance = self.fetch_attendance()
         holidays = self.fetch_CzechHolidays()
+        logs = self.fetch_logs()
 
         self.save_raw_json(users, "users_raw.json")
         self.save_raw_json(attendance, "attendance_raw.json")
         self.save_raw_json(holidays, "holidays_raw.json")
+        self.save_raw_json(logs, "logs_raw.json")

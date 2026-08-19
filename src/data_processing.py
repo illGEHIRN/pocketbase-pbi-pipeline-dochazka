@@ -1609,6 +1609,16 @@ df_fact_user_day.to_csv(PROCESSED_DATA_DIR / "fact_user_day.csv", index=False, e
 df_holidays.to_csv(PROCESSED_DATA_DIR / "dim_holidays.csv", index=False, encoding="utf-8-sig")
 df_dim_schedule.to_csv(PROCESSED_DATA_DIR / "dim_schedule.csv", index=False, encoding="utf-8-sig")
 
+# fix dim_schedule - parquet specific - type issue... explicitly state type of empty colmuns...
+df_dim_schedule["valid_from"] = pd.to_datetime(df_dim_schedule["valid_from"]).dt.date
+df_dim_schedule["valid_to"] = pd.to_datetime(df_dim_schedule["valid_to"], errors="coerce").dt.date
+
+# to parquet
+df_dim_users_export.to_parquet(PROCESSED_DATA_DIR / "dim_users.parquet", index=False)
+df_fact_attendance_event.to_parquet(PROCESSED_DATA_DIR / "fact_attendance_event.parquet", index=False)
+df_fact_user_day.to_parquet(PROCESSED_DATA_DIR / "fact_user_day.parquet", index=False)
+df_holidays.to_parquet(PROCESSED_DATA_DIR / "dim_holidays.parquet", index=False)
+df_dim_schedule.to_parquet(PROCESSED_DATA_DIR / "dim_schedule.parquet", index=False)
 
 # upload data to SQL server..... TO DO
 
